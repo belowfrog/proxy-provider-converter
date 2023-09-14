@@ -1,23 +1,71 @@
-const YAML = require("yaml");
-const axios = require("axios");
+const YAML = require('yaml');
+const axios = require('axios');
+const { LRUCache } = require('lru-cache');
+
+// At least one of 'max', 'ttl', or 'maxSize' is required, to prevent
+// unsafe unbounded storage.
+//
+// In most cases, it's best to specify a max for performance, so all
+// the required memory allocation is done up-front.
+//
+// All the other options are optional, see the sections below for
+// documentation on what each one does.  Most of them can be
+// overridden for specific items in get()/set()
+const options = {
+  max: 500,
+
+  // for use with tracking overall storage size
+  maxSize: 5000,
+  sizeCalculation: (value, key) => {
+    return 1;
+  },
+
+  // for use when you need to clean up something when objects
+  // are evicted from the cache
+  dispose: (value, key) => {},
+
+  // how long to live in ms
+  ttl: 1000 * 60 * 5,
+
+  // return stale items before removing from cache?
+  allowStale: false,
+
+  updateAgeOnGet: false,
+  updateAgeOnHas: false,
+
+  // async method to use for cache.fetch(), for
+  // stale-while-revalidate type of behavior
+  fetchMethod: async (key, staleValue, { options, signal, context }) => {},
+};
+
+const cache = new LRUCache(options);
 
 module.exports = async (req, res) => {
   const url = req.query.url;
   const target = req.query.target;
   console.log(`query: ${JSON.stringify(req.query)}`);
   if (url === undefined) {
-    res.status(400).send("Missing parameter: url");
+    res.status(400).send('Missing parameter: url');
     return;
   }
 
   console.log(`Fetching url: ${url}`);
+
+  if (cache.has(url)) {
+    const response = cache.get(url);
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    res.status(200).send(response);
+
+    return;
+  }
+
   let configFile = null;
   try {
     const result = await axios({
       url,
       headers: {
-        "User-Agent":
-          "ClashX Pro/1.72.0.4 (com.west2online.ClashXPro; build:1.72.0.4; macOS 12.0.1) Alamofire/5.4.4",
+        'User-Agent':
+          'ClashX Pro/1.72.0.4 (com.west2online.ClashXPro; build:1.72.0.4; macOS 12.0.1) Alamofire/5.4.4',
       },
     });
     configFile = result.data;
@@ -37,48 +85,46 @@ module.exports = async (req, res) => {
   }
 
   if (config.proxies === undefined) {
-    res.status(400).send("No proxies in this config");
+    res.status(400).send('No proxies in this config');
     return;
   }
 
-  if (target === "surge") {
-    const supportedProxies = config.proxies.filter((proxy) =>
-      ["ss", "vmess", "trojan"].includes(proxy.type)
+  if (target === 'surge') {
+    const supportedProxies = config.proxies.filter(proxy =>
+      ['ss', 'vmess', 'trojan'].includes(proxy.type),
     );
-    const surgeProxies = supportedProxies.map((proxy) => {
+    const surgeProxies = supportedProxies.map(proxy => {
       console.log(proxy.server);
       const common = `${proxy.name} = ${proxy.type}, ${proxy.server}, ${proxy.port}`;
-      if (proxy.type === "ss") {
+      if (proxy.type === 'ss') {
         // ProxySS = ss, example.com, 2021, encrypt-method=xchacha20-ietf-poly1305, password=12345, obfs=http, obfs-host=example.com, udp-relay=true
-        if (proxy.plugin === "v2ray-plugin") {
+        if (proxy.plugin === 'v2ray-plugin') {
           console.log(
-            `Skip convert proxy ${proxy.name} because Surge does not support Shadowsocks with v2ray-plugin`
+            `Skip convert proxy ${proxy.name} because Surge does not support Shadowsocks with v2ray-plugin`,
           );
           return;
         }
         let result = `${common}, encrypt-method=${proxy.cipher}, password=${proxy.password}`;
-        if (proxy.plugin === "obfs") {
-          const mode = proxy?.["plugin-opts"].mode;
-          const host = proxy?.["plugin-opts"].host;
-          result = `${result}, obfs=${mode}${
-            host ? `, obfs-host=example.com ${host}` : ""
-          }`;
+        if (proxy.plugin === 'obfs') {
+          const mode = proxy?.['plugin-opts'].mode;
+          const host = proxy?.['plugin-opts'].host;
+          result = `${result}, obfs=${mode}${host ? `, obfs-host=example.com ${host}` : ''}`;
         }
         if (proxy.udp) {
           result = `${result}, udp-relay=${proxy.udp}`;
         }
         return result;
-      } else if (proxy.type === "vmess") {
+      } else if (proxy.type === 'vmess') {
         // ProxyVmess = vmess, example.com, 2021, username=0233d11c-15a4-47d3-ade3-48ffca0ce119, skip-cert-verify=true, sni=example.com, tls=true, ws=true, ws-path=/path
-        if (["h2", "http", "grpc"].includes(proxy.network)) {
+        if (['h2', 'http', 'grpc'].includes(proxy.network)) {
           console.log(
-            `Skip convert proxy ${proxy.name} because Surge probably doesn't support Vmess(${proxy.network})`
+            `Skip convert proxy ${proxy.name} because Surge probably doesn't support Vmess(${proxy.network})`,
           );
           return;
         }
         let result = `${common}, username=${proxy.uuid}`;
-        if (proxy["skip-cert-verify"]) {
-          result = `${result}, skip-cert-verify=${proxy["skip-cert-verify"]}`;
+        if (proxy['skip-cert-verify']) {
+          result = `${result}, skip-cert-verify=${proxy['skip-cert-verify']}`;
         }
         if (proxy.servername) {
           result = `${result}, sni=${proxy.servername}`;
@@ -86,24 +132,24 @@ module.exports = async (req, res) => {
         if (proxy.tls) {
           result = `${result}, tls=${proxy.tls}`;
         }
-        if (proxy.network === "ws") {
+        if (proxy.network === 'ws') {
           result = `${result}, ws=true`;
         }
-        if (proxy["ws-path"]) {
-          result = `${result}, ws-path=${proxy["ws-path"]}`;
+        if (proxy['ws-path']) {
+          result = `${result}, ws-path=${proxy['ws-path']}`;
         }
         return result;
-      } else if (proxy.type === "trojan") {
+      } else if (proxy.type === 'trojan') {
         // ProxyTrojan = trojan, example.com, 2021, username=user, password=12345, skip-cert-verify=true, sni=example.com
-        if (["grpc"].includes(proxy.network)) {
+        if (['grpc'].includes(proxy.network)) {
           console.log(
-            `Skip convert proxy ${proxy.name} because Surge probably doesn't support Trojan(${proxy.network})`
+            `Skip convert proxy ${proxy.name} because Surge probably doesn't support Trojan(${proxy.network})`,
           );
           return;
         }
         let result = `${common}, password=${proxy.password}`;
-        if (proxy["skip-cert-verify"]) {
-          result = `${result}, skip-cert-verify=${proxy["skip-cert-verify"]}`;
+        if (proxy['skip-cert-verify']) {
+          result = `${result}, skip-cert-verify=${proxy['skip-cert-verify']}`;
         }
         if (proxy.sni) {
           result = `${result}, sni=${proxy.sni}`;
@@ -111,11 +157,12 @@ module.exports = async (req, res) => {
         return result;
       }
     });
-    const proxies = surgeProxies.filter((p) => p !== undefined);
+    const proxies = surgeProxies.filter(p => p !== undefined);
     res.setHeader('Content-Type', 'text/plain; charset=utf-8');
-    res.status(200).send(proxies.join("\n"));
+    res.status(200).send(proxies.join('\n'));
   } else {
     const response = YAML.stringify({ proxies: config.proxies });
+    cache.set(url, response);
     res.setHeader('Content-Type', 'text/plain; charset=utf-8');
     res.status(200).send(response);
   }
